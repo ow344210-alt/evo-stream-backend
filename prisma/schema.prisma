@@ -1,0 +1,357 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  USER
+  CREATOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum VideoStatus {
+  DRAFT
+  PUBLISHED
+  HIDDEN
+}
+
+// Lifecycle of a real source-video file, separate from publication status
+// (VideoStatus). Metadata-only Video rows have a null processingStatus until a
+// source file is uploaded (UPLOADED), then P2-4 processing advances to
+// PROCESSING -> READY/FAILED. Additive and safe for existing records.
+enum VideoProcessingStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+model User {
+  id            String     @id @default(uuid())
+  email         String     @unique
+  passwordHash  String
+  name          String
+  role          UserRole   @default(USER)
+  status        UserStatus @default(ACTIVE)
+  emailVerified Boolean    @default(false)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  creatorProfile CreatorProfile?
+  refreshTokens  RefreshToken[]
+  emailTokens    EmailVerification[]
+  passwordResets PasswordReset[]
+  // --- P2-7 social relations ---
+  videoLikes     VideoLike[]
+  comments       Comment[]
+  channelFollows ChannelFollow[]
+  savedVideos    SavedVideo[]
+  watchHistory   WatchHistory[]
+  videoShares    VideoShare[]
+
+  @@index([role])
+  @@index([status])
+}
+
+model CreatorProfile {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  bio        String?
+  isVerified Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel Channel?
+}
+
+model Channel {
+  id           String   @id @default(uuid())
+  creatorId    String   @unique
+  name         String
+  slug         String   @unique
+  description  String?
+  logoUrl      String?
+  bannerUrl    String?
+  websiteUrl   String?
+  instagramUrl String?
+  youtubeUrl   String?
+  twitterUrl   String?
+  categoryId   String?
+  isSuspended  Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  creator  CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  category Category?      @relation(fields: [categoryId], references: [id])
+  videos   Video[]
+
+  // --- P2-7 social relations ---
+  followers ChannelFollow[]
+
+  @@index([categoryId])
+}
+
+model Category {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  icon        String?
+  featured    Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  channels Channel[]
+  videos   Video[]
+}
+
+model Video {
+  id           String      @id @default(uuid())
+  channelId    String
+  categoryId   String?
+  title        String
+  description  String?
+  thumbnailUrl String?
+  status       VideoStatus @default(DRAFT)
+  publishedAt  DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  // --- Source file storage metadata (P2-3, additive) ---
+  // Identity of the stored source object is the provider + key pair, never an
+  // absolute filesystem path or a public URL (so CDN/domain can change later).
+  sourceStorageProvider String?
+  sourceStorageKey      String?
+  sourceOriginalName    String?
+  sourceMimeType        String?
+  sourceFileSize        Int?
+  // Null for metadata-only records; set to UPLOADED once a source file exists.
+  processingStatus      VideoProcessingStatus?
+  // Master HLS playlist (P2-4) referencing all renditions, plus poster thumb.
+  hlsMasterKey          String?
+  posterThumbnailKey    String?
+  processError          String?
+  durationSeconds       Float?
+
+  channel    Channel          @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  category   Category?        @relation(fields: [categoryId], references: [id])
+  renditions VideoRendition[]
+  thumbnails VideoThumbnail[]
+
+  // --- P2-7 social relations ---
+  likes    VideoLike[]
+  comments Comment[]
+  savedBy  SavedVideo[]
+  watchBy  WatchHistory[]
+  shares   VideoShare[]
+
+  @@index([channelId])
+  @@index([categoryId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([processingStatus])
+}
+
+// --- Processing (P2-4) ---
+
+// A single HLS rendition derived from the source by transcoding. Renditions use
+// a stable provider+key identity (never an absolute path or public URL).
+model VideoRendition {
+  id              String   @id @default(uuid())
+  videoId         String
+  label           String // e.g. "360p", "480p", "720p", "1080p"
+  bitrateKbps     Int?
+  height          Int?
+  width           Int?
+  codec           String?
+  storageProvider String
+  storageKey      String
+  playlistKey     String // HLS .m3u8 for this rendition
+  createdAt       DateTime @default(now())
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+}
+
+// A derived thumbnail / poster frame extracted from the source.
+model VideoThumbnail {
+  id              String   @id @default(uuid())
+  videoId         String
+  kind            String   @default("poster") // e.g. poster, preview
+  storageProvider String
+  storageKey      String
+  createdAt       DateTime @default(now())
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+}
+
+// --- Social (P2-7) ---
+
+// A viewer's like on a video. One like per (user, video) enforced by a
+// compound unique constraint; toggling is implemented as create/delete.
+model VideoLike {
+  id        String   @id @default(uuid())
+  userId    String
+  videoId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([videoId])
+  @@index([createdAt])
+}
+
+// A comment or reply on a video. Root comments have parentId null; replies
+// reference a parent comment (same video). Deleting a parent cascades to its
+// replies (deliberate policy).
+model Comment {
+  id        String   @id @default(uuid())
+  videoId   String
+  userId    String
+  parentId  String?
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video   Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[] @relation("CommentReplies")
+
+  @@index([videoId])
+  @@index([parentId])
+  @@index([createdAt])
+}
+
+// A viewer following a channel. One follow per (user, channel) enforced by a
+// compound unique constraint; toggle is create/delete.
+model ChannelFollow {
+  id         String   @id @default(uuid())
+  userId     String
+  channelId  String
+  followedAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channelId])
+  @@index([channelId])
+  @@index([followedAt])
+}
+
+// A video saved to a viewer's library. One save per (user, video) enforced by
+// a compound unique constraint; toggle is create/delete.
+model SavedVideo {
+  id      String   @id @default(uuid())
+  userId  String
+  videoId String
+  savedAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([videoId])
+  @@index([savedAt])
+}
+
+// Per-viewer watch progress. One row per (user, video), upserted on each
+// progress report so the list stays deduplicated with the latest position.
+model WatchHistory {
+  id              String   @id @default(uuid())
+  userId          String
+  videoId         String
+  positionSeconds Float    @default(0)
+  progressPercent Float    @default(0)
+  watchedAt       DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([videoId])
+  @@index([watchedAt])
+}
+
+// A recorded share of a video. Each share action appends a row so share counts
+// accumulate over time.
+model VideoShare {
+  id        String   @id @default(uuid())
+  videoId   String
+  userId    String?
+  createdAt DateTime @default(now())
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([videoId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model EmailVerification {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordReset {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PlatformPolicy {
+  id        String   @id @default(uuid())
+  title     String
+  slug      String   @unique
+  content   String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
