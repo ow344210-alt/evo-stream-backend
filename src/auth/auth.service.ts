@@ -21,9 +21,15 @@ import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { EmailService } from './email/email.service';
+import {
+  renderPasswordResetEmail,
+  renderResendVerificationEmail,
+  renderVerificationEmail,
+} from './email/email-templates';
 import { RegisterAccountType } from './types/register-account-type';
 import { JwtPayload } from './types/jwt-payload.type';
 import { AuthenticatedUser } from './types/authenticated-user.type';
+import { UserValidationCacheService } from './user-validation-cache.service';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -53,24 +59,8 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly email: EmailService,
+    private readonly userCache: UserValidationCacheService,
   ) {}
-
-  /**
-   * DEVELOPMENT-ONLY helper. Logs the freshly generated verification code to the
-   * backend terminal so it can be entered into the existing verification form
-   * when real email delivery is not possible (e.g. no verified Resend domain).
-   *
-   * Strictly guarded by `NODE_ENV === 'production'` — in production this helper
-   * is a no-op and the code is never logged or otherwise exposed.
-   */
-  private logDevVerificationCode(email: string, code: string): void {
-    if (this.config.get<string>('NODE_ENV') === 'production') {
-      return;
-    }
-    this.logger.log(
-      `[DEV EMAIL VERIFICATION]\nEmail: ${email}\nVerification Code: ${code}`,
-    );
-  }
 
   private safeUser(user: User): SafeUser {
     return {
@@ -117,6 +107,16 @@ export class AuthService {
 
   private generateResetToken(): string {
     return crypto.randomBytes(32).toString('base64url');
+  }
+
+  /**
+   * Reads the optional non-secret EMAIL_LOGO_URL branding variable. Returns
+   * null when unset so the email templates fall back to the text EVO brand.
+   * The value is validated + escaped by the template layer.
+   */
+  private getEmailLogoUrl(): string | null {
+    const value = this.config.get<string>('EMAIL_LOGO_URL');
+    return value && value.trim() ? value.trim() : null;
   }
 
   private normalizeEmail(email: string): string {
@@ -198,16 +198,16 @@ export class AuthService {
       },
     });
 
-    // Always attempt normal Resend delivery (no-op in dev when unconfigured).
+    // Always attempt normal Brevo delivery (no-op in dev when unconfigured).
+    const verificationEmail = renderVerificationEmail(code, {
+      logoUrl: this.getEmailLogoUrl(),
+    });
     await this.email.send({
       to: user.email,
-      subject: 'Verify your EVO email address',
-      html: `<p>Your EVO verification code is: <strong>${code}</strong></p><p>It expires in 1 hour.</p>`,
+      subject: verificationEmail.subject,
+      html: verificationEmail.html,
+      text: verificationEmail.text,
     });
-
-    // DEVELOPMENT ONLY: surface the code in the backend terminal for local
-    // testing. Never returned in the API response, never exposed to the client.
-    this.logDevVerificationCode(user.email, code);
 
     return { user: this.safeUser(user), verificationCode: null };
   }
@@ -308,6 +308,10 @@ export class AuthService {
       }),
     ]);
 
+    // Email verification is part of the validated user object; drop it from
+    // the JWT validation cache so the next request reflects the new state.
+    this.userCache.invalidateUser(user.id);
+
     return { message: 'Email verified successfully', emailVerified: true };
   }
 
@@ -332,16 +336,16 @@ export class AuthService {
       },
     });
 
-    // Attempt normal Resend delivery.
+    // Attempt normal Brevo delivery.
+    const resendEmail = renderResendVerificationEmail(code, {
+      logoUrl: this.getEmailLogoUrl(),
+    });
     await this.email.send({
       to: user.email,
-      subject: 'Verify your EVO email address',
-      html: `<p>Your EVO verification code is: <strong>${code}</strong></p>`,
+      subject: resendEmail.subject,
+      html: resendEmail.html,
+      text: resendEmail.text,
     });
-
-    // DEVELOPMENT ONLY: surface the NEW code to the backend terminal. The
-    // previous code remains invalid per the existing used/expiry invalidation.
-    this.logDevVerificationCode(user.email, code);
 
     return { message: 'If the account exists, a verification email was sent', verificationCode: null };
   }
@@ -366,10 +370,15 @@ export class AuthService {
       },
     });
 
+    const resetUrl = `${this.config.get<string>('FRONTEND_URL')}/creator/auth?mode=reset&token=${token}`;
+    const resetEmail = renderPasswordResetEmail(resetUrl, {
+      logoUrl: this.getEmailLogoUrl(),
+    });
     await this.email.send({
       to: user.email,
-      subject: 'Reset your EVO password',
-      html: `<p>Use the following link to reset your password:</p><p><a href="${this.config.get<string>('FRONTEND_URL')}/creator/auth?mode=reset&token=${token}">Reset password</a></p><p>This link expires in 1 hour.</p>`,
+      subject: resetEmail.subject,
+      html: resetEmail.html,
+      text: resetEmail.text,
     });
 
     return { message: 'If an account with that email exists, a reset link has been sent' };
@@ -407,6 +416,10 @@ export class AuthService {
         data: { revokedAt: new Date() },
       }),
     ]);
+
+    // A password reset changes security-sensitive account state; drop the
+    // cached validation so the next request re-reads the current user row.
+    this.userCache.invalidateUser(record.userId);
 
     return { message: 'Password has been reset successfully' };
   }

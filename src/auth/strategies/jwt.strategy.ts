@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { performance } from 'node:perf_hooks';
 import { User } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { UserValidationCacheService } from '../user-validation-cache.service';
 import { JwtPayload } from '../types/jwt-payload.type';
 import { AuthenticatedUser } from '../types/authenticated-user.type';
 
@@ -16,6 +17,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
     config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly userCache: UserValidationCacheService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -25,6 +27,16 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
+    // Short-TTL cache + single-flight deduplication: repeated and concurrent
+    // requests for the same user share one DB lookup instead of issuing a
+    // `prisma.user.findUnique()` per request. Loading is deferred to the DB
+    // again when the cached entry expires (default 30s) or is invalidated.
+    return this.userCache.loadUser(payload.sub, () =>
+      this.loadUserFromDb(payload),
+    );
+  }
+
+  private async loadUserFromDb(payload: JwtPayload): Promise<AuthenticatedUser> {
     const startTotal = performance.now();
 
     let user: User | null;

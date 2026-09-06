@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { UserRole, UserStatus } from '@prisma/client';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { RolesGuard } from './guards/roles.guard';
+import { UserValidationCacheService } from './user-validation-cache.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { ROLES_KEY } from './decorators/roles.decorator';
@@ -26,9 +27,13 @@ describe('JwtStrategy', () => {
     get: (k: string) => (k === 'JWT_ACCESS_SECRET' ? 'secret' : ''),
   } as unknown as ConfigService;
 
-  beforeEach(() => {
+beforeEach(() => {
     prisma = { user: { findUnique: jest.fn() } };
-    strategy = new JwtStrategy(configService, prisma as unknown as PrismaService);
+    strategy = new JwtStrategy(
+      configService,
+      prisma as unknown as PrismaService,
+      UserValidationCacheService.create(),
+    );
   });
 
   it('9. valid JWT payload validates an active user', async () => {

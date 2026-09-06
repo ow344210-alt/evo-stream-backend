@@ -7,9 +7,11 @@ import { AuthService } from './auth.service';
 import { RegisterAccountType } from './types/register-account-type';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from './email/email.service';
+import { UserValidationCacheService } from './user-validation-cache.service';
 
 describe('AuthService', () => {
   let service: AuthService;
+  let emailMock: { send: jest.Mock; isConfigured: boolean };
   let prisma: {
     user: Record<string, jest.Mock>;
     creatorProfile: Record<string, jest.Mock>;
@@ -32,9 +34,9 @@ describe('AuthService', () => {
     ...overrides,
   });
 
-  const configService = {
+const configService = {
     get: jest.fn((key: string) => {
-const map: Record<string, string> = {
+      const map: Record<string, string> = {
         NODE_ENV: 'test',
         JWT_ACCESS_SECRET: 'test-access-secret',
         JWT_REFRESH_SECRET: 'test-refresh-secret',
@@ -42,10 +44,6 @@ const map: Record<string, string> = {
         JWT_REFRESH_EXPIRES_IN: '7d',
         FRONTEND_URL: 'http://localhost:3000',
       };
-      // Allow individual tests to override the environment (e.g. production).
-      if (key === 'NODE_ENV' && (global as unknown as { __nodeEnv?: string }).__nodeEnv) {
-        return (global as unknown as { __nodeEnv: string }).__nodeEnv;
-      }
       return map[key];
     }),
   } as unknown as ConfigService;
@@ -58,12 +56,13 @@ const map: Record<string, string> = {
       isConfigured: true,
     } as unknown as EmailService);
 
-  const makeService = (email: EmailService) =>
+const makeService = (email: { send: jest.Mock; isConfigured: boolean }) =>
     new AuthService(
       prisma as unknown as PrismaService,
       jwtService,
       configService,
-      email,
+      email as unknown as EmailService,
+      UserValidationCacheService.create(),
     );
 
   beforeEach(() => {
@@ -90,9 +89,10 @@ const map: Record<string, string> = {
         findUnique: jest.fn(),
         update: jest.fn(),
       },
-      $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
+$transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
     };
-    service = makeService(makeEmail());
+    emailMock = makeEmail() as unknown as { send: jest.Mock; isConfigured: boolean };
+    service = makeService(emailMock);
   });
 
   describe('register', () => {
@@ -171,35 +171,30 @@ expect(prisma.user.create).not.toHaveBeenCalled();
       expect(JSON.stringify(result)).not.toMatch(/\d{6}/);
     });
 
-    it('does not log the verification code in production', async () => {
-      (global as unknown as { __nodeEnv: string }).__nodeEnv = 'production';
-      try {
-        prisma.user.findUnique.mockResolvedValue(null);
-        prisma.user.create.mockImplementation(async ({ data }) =>
-          mockUser({ email: data.email }),
-        );
+    it('never logs the verification code in any environment', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.user.create.mockImplementation(async ({ data }) =>
+        mockUser({ email: data.email }),
+      );
 
-        const loggerSpy = jest
-          .spyOn((service as unknown as { logger: { log: jest.Mock } }).logger, 'log')
-          .mockImplementation(() => undefined);
+      const loggerSpy = jest
+        .spyOn((service as unknown as { logger: { log: jest.Mock } }).logger, 'log')
+        .mockImplementation(() => undefined);
 
-        await service.register({
-          name: 'Test Creator',
-          email: 'creator@example.com',
-          password: 'Password123',
-          accountType: RegisterAccountType.CREATOR,
-        });
+      await service.register({
+        name: 'Test Creator',
+        email: 'creator@example.com',
+        password: 'Password123',
+        accountType: RegisterAccountType.CREATOR,
+      });
 
-        const logCalls = loggerSpy.mock.calls
-          .map((c) => String(c[0]))
-          .join('\n');
-        expect(logCalls).not.toMatch(/[DEV EMAIL VERIFICATION]/);
-        expect(logCalls).not.toMatch(/\d{6}/);
+      const logCalls = loggerSpy.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(logCalls).not.toMatch(/[DEV EMAIL VERIFICATION]/);
+      expect(logCalls).not.toMatch(/\d{6}/);
 
-        loggerSpy.mockRestore();
-      } finally {
-        delete (global as unknown as { __nodeEnv?: string }).__nodeEnv;
-      }
+      loggerSpy.mockRestore();
     });
   });
 
@@ -385,7 +380,7 @@ expect(prisma.user.create).not.toHaveBeenCalled();
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('valid reset token updates password and revokes sessions', async () => {
+it('valid reset token updates password and revokes sessions', async () => {
       prisma.passwordReset.findUnique.mockResolvedValue({
         id: 'pr-1',
         userId: 'user-1',
@@ -398,6 +393,85 @@ expect(prisma.user.create).not.toHaveBeenCalled();
       const result = await service.resetPassword({ token: 'valid-token', password: 'NewPassword123' });
       expect(result.message).toContain('reset');
       expect(prisma.refreshToken.updateMany).toHaveBeenCalled();
+    });
+  });
+
+  describe('email provider flows (Brevo delivery)', () => {
+    it('register sends the professional verification email (subject, recipient, OTP, plain text)', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.user.create.mockImplementation(async ({ data }) =>
+        mockUser({ email: data.email, role: data.role }),
+      );
+
+      await service.register({
+        name: 'Test Creator',
+        email: 'creator@example.com',
+        password: 'Password123',
+        accountType: RegisterAccountType.CREATOR,
+      });
+
+      expect(emailMock.send).toHaveBeenCalledTimes(1);
+      const msg = emailMock.send.mock.calls[0][0] as {
+        to: string;
+        subject: string;
+        html: string;
+        text: string;
+      };
+      expect(msg.to).toBe('creator@example.com');
+      expect(msg.subject).toBe('Verify your email — EVO');
+      expect(msg.html).toContain('STREAM BEYOND');
+      expect(msg.html).toContain('Verify your email');
+      expect(String(msg.html)).toMatch(/>\d</);
+      expect(msg.text).toMatch(/\d{6}/);
+      expect(msg.html).not.toContain('<img');
+      expect(msg.html.toLowerCase()).not.toContain('localhost');
+    });
+
+    it('resendVerification sends a fresh 6-digit code through the shared email provider', async () => {
+      prisma.user.findUnique.mockResolvedValue(mockUser({ emailVerified: false }));
+      prisma.emailVerification.create.mockResolvedValue({});
+
+      await service.resendVerification({ email: 'creator@example.com' });
+
+      expect(emailMock.send).toHaveBeenCalledTimes(1);
+      const msg = emailMock.send.mock.calls[0][0] as {
+        to: string;
+        subject: string;
+        html: string;
+        text: string;
+      };
+      expect(msg.to).toBe('creator@example.com');
+      expect(msg.subject).toBe('Your new verification code — EVO');
+      expect(msg.html).toContain('This is your new verification code.');
+      expect(msg.text).toMatch(/\d{6}/);
+    });
+
+    it('resendVerification for an already-verified account does not send', async () => {
+      prisma.user.findUnique.mockResolvedValue(mockUser({ emailVerified: true }));
+
+      await service.resendVerification({ email: 'creator@example.com' });
+
+      expect(emailMock.send).not.toHaveBeenCalled();
+    });
+
+    it('forgotPassword sends the professional password-reset email through the shared email provider', async () => {
+      prisma.user.findUnique.mockResolvedValue(mockUser());
+      prisma.passwordReset.create.mockResolvedValue({});
+
+      await service.forgotPassword({ email: 'creator@example.com' });
+
+      expect(emailMock.send).toHaveBeenCalledTimes(1);
+      const msg = emailMock.send.mock.calls[0][0] as {
+        to: string;
+        subject: string;
+        html: string;
+        text: string;
+      };
+      expect(msg.to).toBe('creator@example.com');
+      expect(msg.subject).toBe('Reset your password — EVO');
+      expect(String(msg.html)).toContain('Reset your password');
+      expect(String(msg.html)).toContain('mode=reset&amp;token=');
+      expect(msg.text).toContain('mode=reset&token=');
     });
   });
 });

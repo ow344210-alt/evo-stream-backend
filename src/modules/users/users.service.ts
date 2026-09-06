@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { UserValidationCacheService } from '../../auth/user-validation-cache.service';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
 import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 
@@ -59,7 +60,10 @@ export interface UserQueryDto extends PaginationQueryDto {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly userCache: UserValidationCacheService,
+  ) {}
 
   private serialize(user: any): AdminUser {
     return {
@@ -169,6 +173,9 @@ export class UsersService {
         creatorProfile: { include: { channel: { select: { id: true, name: true, slug: true } } } },
       },
     });
+    // Role is part of the validated JWT user object (RBAC input); drop the
+    // cached validation so the next request reflects the new permissions.
+    this.userCache.invalidateUser(id);
     return this.serialize(updated);
   }
 
@@ -190,6 +197,10 @@ export class UsersService {
         creatorProfile: { include: { channel: { select: { id: true, name: true, slug: true } } } },
       },
     });
+    // Status guards account activation/suspension; invalidate the cached
+    // validation immediately so a suspend/unsuspend takes effect on the next
+    // authenticated request instead of waiting out the TTL.
+    this.userCache.invalidateUser(id);
     return this.serialize(updated);
   }
 

@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { UserRole, UserStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { UserValidationCacheService } from '../../auth/user-validation-cache.service';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
 import { UpdateUserStatusDto } from '../users/dto/update-user-status.dto';
 import { UpdateCreatorVerificationDto } from './dto/update-creator-verification.dto';
@@ -37,7 +38,10 @@ export interface CreatorQueryDto extends PaginationQueryDto {
 
 @Injectable()
 export class CreatorsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly userCache: UserValidationCacheService,
+  ) {}
 
   private serialize(user: any): AdminCreator {
     return {
@@ -160,6 +164,10 @@ export class CreatorsService {
       }
       return user;
     });
+
+    // Account suspension is part of the validated JWT user object; drop the
+    // cached validation so a suspended creator is rejected on the next request.
+    this.userCache.invalidateUser(id);
 
     return this.serialize(updated);
   }

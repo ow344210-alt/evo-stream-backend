@@ -2,6 +2,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { UserRole, UserStatus } from '@prisma/client';
 import { UsersService } from './users.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { UserValidationCacheService } from '../../auth/user-validation-cache.service';
 
 describe('UsersService', () => {
   let service: UsersService;
@@ -34,9 +35,9 @@ describe('UsersService', () => {
     creatorProfile: null,
   };
 
-  beforeEach(() => {
+beforeEach(() => {
     jest.clearAllMocks();
-    service = new UsersService(prisma);
+    service = new UsersService(prisma, UserValidationCacheService.create());
   });
 
   it('serializes users without exposing passwordHash', async () => {

@@ -2,6 +2,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { UserRole, UserStatus } from '@prisma/client';
 import { CreatorsService } from './creators.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { UserValidationCacheService } from '../../auth/user-validation-cache.service';
 
 describe('CreatorsService', () => {
   let service: CreatorsService;
@@ -34,9 +35,9 @@ describe('CreatorsService', () => {
     },
   };
 
-  beforeEach(() => {
+beforeEach(() => {
     jest.clearAllMocks();
-    service = new CreatorsService(prisma);
+    service = new CreatorsService(prisma, UserValidationCacheService.create());
   });
 
   it('series only role CREATOR users and hides passwordHash', async () => {

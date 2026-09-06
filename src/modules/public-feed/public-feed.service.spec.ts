@@ -165,5 +165,143 @@ describe('PublicFeedService', () => {
       expect(res.total).toBe(0);
       expect(prisma.video.findMany).not.toHaveBeenCalled();
     });
+
+    describe('P1-1 deterministic results (ILIKE-equivalent mock)', () => {
+      const eligible = (r: any) =>
+        r.status === VideoStatus.PUBLISHED && r.processingStatus === VideoProcessingStatus.READY;
+
+      const like = (value: string, needle: string) =>
+        value.toLowerCase().includes(needle.toLowerCase());
+
+      function matches(row: any, where: any) {
+        const or = where.OR ?? [];
+        return (
+          eligible(row) &&
+          or.some((c: any) => {
+            if (c.title?.contains) return like(row.title, c.title.contains);
+            if (c.channel?.name?.contains)
+              return like(row.channel?.name ?? '', c.channel.name.contains);
+            return false;
+          })
+        );
+      }
+
+      /** Emulate PostgreSQL ILIKE contains on the mocked rows for the produced where clause. */
+      function mockFilteredMatching() {
+        prisma.video.findMany = jest
+          .fn()
+          .mockImplementation((args: any) =>
+            Promise.resolve(rows.filter((r) => matches(r, args.where))),
+          );
+        prisma.video.count = jest
+          .fn()
+          .mockImplementation((args: any) =>
+            Promise.resolve(rows.filter((r) => matches(r, args.where)).length),
+          );
+      }
+
+      const publishedRow = () =>
+        row({
+          id: 'mobile-1',
+          title: 'Mobile Upload Test',
+          status: VideoStatus.PUBLISHED,
+          processingStatus: VideoProcessingStatus.READY,
+        });
+
+      it('exact title search returns the eligible published video', async () => {
+        rows = [publishedRow()];
+        mockFilteredMatching();
+
+        const res = await service.search({ page: 1, pageSize: 20, q: 'Mobile Upload Test' });
+
+        expect(prisma.video.findMany.mock.calls[0][0].where.OR[0].title).toEqual({
+          contains: 'Mobile Upload Test',
+          mode: 'insensitive',
+        });
+        expect(res.items.map((i) => i.id)).toEqual(['mobile-1']);
+        expect(res.total).toBe(1);
+      });
+
+      it('partial title search returns the eligible video', async () => {
+        rows = [publishedRow()];
+        mockFilteredMatching();
+
+        const res = await service.search({ page: 1, pageSize: 20, q: 'Mobile' });
+
+        expect(res.items.map((i) => i.id)).toEqual(['mobile-1']);
+        expect(res.total).toBe(1);
+      });
+
+      it('lowercase and uppercase queries still match case-insensitively', async () => {
+        rows = [publishedRow()];
+        mockFilteredMatching();
+
+        const lower = await service.search({ page: 1, pageSize: 20, q: 'mobile' });
+        const upper = await service.search({ page: 1, pageSize: 20, q: 'UPLOAD' });
+
+        expect(lower.items.map((i) => i.id)).toEqual(['mobile-1']);
+        expect(upper.items.map((i) => i.id)).toEqual(['mobile-1']);
+        expect(prisma.video.findMany.mock.calls[0][0].where.OR[0].title.mode).toBe('insensitive');
+      });
+
+      it('trims surrounding whitespace before matching', async () => {
+        rows = [publishedRow()];
+        mockFilteredMatching();
+
+        const res = await service.search({ page: 1, pageSize: 20, q: '  Mobile Upload Test  ' });
+
+        expect(prisma.video.findMany.mock.calls[0][0].where.OR[0].title.contains).toBe(
+          'Mobile Upload Test',
+        );
+        expect(res.items.map((i) => i.id)).toEqual(['mobile-1']);
+      });
+
+      it('non-matching query returns a genuine empty page', async () => {
+        rows = [publishedRow()];
+        mockFilteredMatching();
+
+        const res = await service.search({ page: 1, pageSize: 20, q: 'zzz-no-such-video' });
+
+        expect(res.items).toEqual([]);
+        expect(res.total).toBe(0);
+        expect(res.totalPages).toBe(0);
+      });
+
+      it('excludes DRAFT and non-READY videos from search results', async () => {
+        rows = [
+          publishedRow(),
+          row({
+            id: 'draft-1',
+            title: 'Mobile Upload Draft',
+            status: VideoStatus.DRAFT,
+            processingStatus: VideoProcessingStatus.READY,
+          }),
+          row({
+            id: 'processing-1',
+            title: 'Mobile Upload Processing',
+            status: VideoStatus.PUBLISHED,
+            processingStatus: VideoProcessingStatus.PROCESSING,
+          }),
+        ];
+        mockFilteredMatching();
+
+        const res = await service.search({ page: 1, pageSize: 20, q: 'Mobile' });
+
+        expect(res.items.map((i) => i.id)).toEqual(['mobile-1']);
+        expect(res.total).toBe(1);
+      });
+
+      it('keeps pagination params on the search query', async () => {
+        rows = [publishedRow(), publishedRow()].map((r, i) => ({ ...r, id: `mobile-${i + 1}` }));
+        rows[1].title = 'Another Upload Test';
+
+        const args = await service.search({ page: 2, pageSize: 10, q: 'Mobile' });
+        const findArgs = prisma.video.findMany.mock.calls[0][0];
+        expect(findArgs.skip).toBe(10);
+        expect(findArgs.take).toBe(10);
+        expect(args.page).toBe(2);
+        expect(args.pageSize).toBe(10);
+      });
+    });
   });
 });

@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { UserValidationCacheService, DEFAULT_TTL_MS, DEFAULT_MAX_ENTRIES } from './user-validation-cache.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from './guards/roles.guard';
 import { EmailService } from './email/email.service';
@@ -34,6 +35,15 @@ import { EmailService } from './email/email.service';
     AuthService,
     JwtStrategy,
     EmailService,
+UserValidationCacheService,
+    {
+      provide: DEFAULT_TTL_MS,
+      useValue: UserValidationCacheService.FALLBACK_TTL_MS,
+    },
+    {
+      provide: DEFAULT_MAX_ENTRIES,
+      useValue: UserValidationCacheService.FALLBACK_MAX_ENTRIES,
+    },
     {
       provide: APP_GUARD,
       useClass: JwtAuthGuard,
@@ -43,6 +53,6 @@ import { EmailService } from './email/email.service';
       useClass: RolesGuard,
     },
   ],
-  exports: [AuthService, EmailService],
+  exports: [AuthService, EmailService, UserValidationCacheService],
 })
 export class AuthModule {}
