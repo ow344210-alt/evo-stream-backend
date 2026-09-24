@@ -26,6 +26,7 @@ describe('VideosService', () => {
   let storage: {
     store: jest.Mock;
     delete: jest.Mock;
+    deletePrefix: jest.Mock;
     getObject: jest.Mock;
   };
   let queue: { enqueue: jest.Mock };
@@ -60,6 +61,7 @@ describe('VideosService', () => {
     storage = {
       store: jest.fn(),
       delete: jest.fn(),
+      deletePrefix: jest.fn(),
       getObject: jest.fn(),
     };
     queue = { enqueue: jest.fn() };
@@ -246,7 +248,7 @@ describe('VideosService', () => {
 
   // ---- Delete / hide ----
 
-  it('delete cleans up the associated source object after DB delete', async () => {
+  it('delete cleans up the whole stored tree for the video after DB delete', async () => {
     prisma.video.findFirst = jest.fn().mockResolvedValue({
       ...ownVideo,
       sourceStorageKey: 'videos/v1/source/clip.mp4',
@@ -256,7 +258,9 @@ describe('VideosService', () => {
     await service.removeOwn('u1', 'v1');
 
     expect(prisma.video.delete).toHaveBeenCalledWith({ where: { id: 'v1' } });
-    expect(storage.delete).toHaveBeenCalledWith('videos/v1/source/clip.mp4');
+    // The entire videos/{videoId} prefix (source + HLS tree + posters) is
+    // removed so no orphaned media remains for either provider.
+    expect(storage.deletePrefix).toHaveBeenCalledWith('videos/v1');
   });
 
   it('delete does not attempt storage cleanup when no source exists', async () => {
@@ -265,7 +269,7 @@ describe('VideosService', () => {
 
     await service.removeOwn('u1', 'v1');
 
-    expect(storage.delete).not.toHaveBeenCalled();
+    expect(storage.deletePrefix).not.toHaveBeenCalled();
   });
 
   it('hiding a video does NOT delete its source object', async () => {

@@ -2,12 +2,14 @@ import { NotFoundException } from '@nestjs/common';
 import { VideoProcessingStatus, VideoStatus } from '@prisma/client';
 import { VideoPlaybackService } from './video-playback.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { VideoStorageProvider } from '../video-storage/video-storage.types';
 
 describe('VideoPlaybackService', () => {
   let service: VideoPlaybackService;
   let prisma: {
     video: { findUnique: jest.Mock };
   };
+  let storage: { name: string; getPublicUrl: jest.Mock };
 
   const readyPublishedVideo = {
     id: 'v1',
@@ -33,8 +35,13 @@ describe('VideoPlaybackService', () => {
     prisma = {
       video: { findUnique: jest.fn() },
     };
+    storage = {
+      name: 'local',
+      getPublicUrl: jest.fn(() => null),
+    };
     service = new VideoPlaybackService(
       prisma as unknown as PrismaService,
+      storage as unknown as VideoStorageProvider,
     );
   });
 
@@ -272,6 +279,55 @@ describe('VideoPlaybackService', () => {
       expect(responseStr).not.toMatch(/[A-Z]:\\/);
       expect(responseStr).not.toContain('backend');
       expect(responseStr).not.toContain('storage');
+    });
+  });
+
+  describe('CDN (bunny) URL construction', () => {
+    function useBunnyStorage() {
+      storage = {
+        name: 'bunny',
+        getPublicUrl: jest.fn((key: string) => `https://cdn.example.com/${key}`),
+      };
+      service = new VideoPlaybackService(
+        prisma as unknown as PrismaService,
+        storage as unknown as VideoStorageProvider,
+      );
+    }
+
+    it('uses the provider public URL for the HLS master instead of /api/media', async () => {
+      useBunnyStorage();
+      prisma.video.findUnique = jest.fn().mockResolvedValue(readyPublishedVideo);
+
+      const result = await service.getPlaybackMetadata('v1');
+
+      expect(result.hlsMasterUrl).toBe('https://cdn.example.com/videos/v1/hls/master.m3u8');
+    });
+
+    it('uses the provider public URL for the poster instead of /api/media', async () => {
+      useBunnyStorage();
+      prisma.video.findUnique = jest.fn().mockResolvedValue(readyPublishedVideo);
+
+      const result = await service.getPlaybackMetadata('v1');
+
+      expect(result.posterUrl).toBe('https://cdn.example.com/videos/v1/thumbnails/poster.jpg');
+    });
+
+    it('bunny playback URLs never depend on /api/media', async () => {
+      useBunnyStorage();
+      prisma.video.findUnique = jest.fn().mockResolvedValue(readyPublishedVideo);
+
+      const result = await service.getPlaybackMetadata('v1');
+      const responseStr = JSON.stringify(result);
+      expect(responseStr).not.toContain('/api/media');
+    });
+
+    it('falls back to /api/media for null public URL (local provider)', async () => {
+      prisma.video.findUnique = jest.fn().mockResolvedValue(readyPublishedVideo);
+
+      const result = await service.getPlaybackMetadata('v1');
+
+      expect(result.hlsMasterUrl).toBe('/api/media/v1/hls/master.m3u8');
+      expect(result.posterUrl).toBe('/api/media/v1/thumbnails/poster.jpg');
     });
   });
 });

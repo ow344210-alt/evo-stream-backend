@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Ip,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -19,10 +20,12 @@ import { SavedVideosService } from './saved-videos.service';
 import { WatchHistoryService } from './watch-history.service';
 import { VideoSharesService } from './video-shares.service';
 import { SocialSummaryService } from './social-summary.service';
+import { VideoViewsService } from './video-views.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { UpdateCommentDto } from './dto/update-comment.dto';
 import { ListCommentsQueryDto } from './dto/list-comments.query';
 import { RecordProgressDto } from './dto/record-progress.dto';
+import { RecordViewDto } from './dto/record-view.dto';
 
 @Controller()
 export class VideoSocialController {
@@ -33,6 +36,7 @@ export class VideoSocialController {
     private readonly history: WatchHistoryService,
     private readonly shares: VideoSharesService,
     private readonly summaryService: SocialSummaryService,
+    private readonly views: VideoViewsService,
   ) {}
 
   // ---- Likes ----
@@ -105,6 +109,20 @@ export class VideoSocialController {
     @Body() dto: RecordProgressDto,
   ) {
     return this.history.recordProgress(userId, videoId, dto);
+  }
+
+  // ---- Qualified Views ----
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Post('videos/:videoId/view')
+  recordView(
+    @Param('videoId', ParseUUIDPipe) videoId: string,
+    @Ip() ip: string,
+    @Body() dto: RecordViewDto,
+    @CurrentUser('id') userId?: string,
+  ) {
+    return this.views.recordView(videoId, userId, ip, dto);
   }
 
   // ---- Shares ----

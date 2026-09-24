@@ -31,12 +31,80 @@ describe('VideoStorageConfig', () => {
     ).toThrow(/Unsupported VIDEO_STORAGE_PROVIDER/);
   });
 
-  it('fails fast when a production provider is selected without an adapter', () => {
-    for (const provider of ['s3', 'bunny']) {
-      expect(
-        () => new VideoStorageConfig(makeConfig({ VIDEO_STORAGE_PROVIDER: provider })),
-      ).toThrow(/not yet implemented/);
+  it('fails fast when the s3 provider is selected without an adapter', () => {
+    expect(
+      () => new VideoStorageConfig(makeConfig({ VIDEO_STORAGE_PROVIDER: 's3' })),
+    ).toThrow(/not yet implemented/);
+  });
+
+  it('fails fast when bunny is selected but its environment variables are missing', () => {
+    expect(
+      () => new VideoStorageConfig(makeConfig({ VIDEO_STORAGE_PROVIDER: 'bunny' })),
+    ).toThrow(/VIDEO_STORAGE_PROVIDER=bunny requires the following environment variables/);
+    const message = (() => {
+      try {
+        new VideoStorageConfig(makeConfig({ VIDEO_STORAGE_PROVIDER: 'bunny' }));
+        return '';
+      } catch (error) {
+        return error instanceof Error ? error.message : '';
+      }
+    })();
+    expect(message).toContain('BUNNY_STORAGE_ZONE');
+    expect(message).toContain('BUNNY_STORAGE_API_KEY');
+    expect(message).toContain('BUNNY_STORAGE_HOSTNAME');
+    expect(message).toContain('BUNNY_PULL_ZONE_HOSTNAME');
+  });
+
+  it('lists only missing variable names for bunny and never leaks values', () => {
+    let message = '';
+    try {
+      new VideoStorageConfig(
+        makeConfig({
+          VIDEO_STORAGE_PROVIDER: 'bunny',
+          BUNNY_STORAGE_ZONE: 'my-zone',
+          BUNNY_STORAGE_API_KEY: 'super-secret-key-value',
+          BUNNY_STORAGE_HOSTNAME: 'storage.bunnycdn.com',
+        }),
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : '';
     }
+    expect(message).toContain('BUNNY_PULL_ZONE_HOSTNAME');
+    expect(message).not.toContain('super-secret-key-value');
+    expect(message).not.toContain('my-zone');
+  });
+
+  it('constructs the bunny config when all bunny variables are present', () => {
+    const cfg = new VideoStorageConfig(
+      makeConfig({
+        VIDEO_STORAGE_PROVIDER: 'bunny',
+        BUNNY_STORAGE_ZONE: 'my-zone',
+        BUNNY_STORAGE_API_KEY: 'some-key',
+        BUNNY_STORAGE_HOSTNAME: 'storage.bunnycdn.com',
+        BUNNY_PULL_ZONE_HOSTNAME: 'my-zone.b-cdn.net',
+      }),
+    );
+    expect(cfg.provider).toBe('bunny');
+    expect(cfg.localStoragePath).toBe('');
+    expect(cfg.bunnyStorageZone).toBe('my-zone');
+    expect(cfg.bunnyStorageApiKey).toBe('some-key');
+    expect(cfg.bunnyStorageHostname).toBe('storage.bunnycdn.com');
+    expect(cfg.bunnyPullZoneHostname).toBe('my-zone.b-cdn.net');
+  });
+
+  it('rejects bunny hostnames that contain a scheme or path', () => {
+    expect(
+      () =>
+        new VideoStorageConfig(
+          makeConfig({
+            VIDEO_STORAGE_PROVIDER: 'bunny',
+            BUNNY_STORAGE_ZONE: 'my-zone',
+            BUNNY_STORAGE_API_KEY: 'k',
+            BUNNY_STORAGE_HOSTNAME: 'https://storage.bunnycdn.com',
+            BUNNY_PULL_ZONE_HOSTNAME: 'my-zone.b-cdn.net',
+          }),
+        ),
+    ).toThrow(/BUNNY_STORAGE_HOSTNAME/);
   });
 
   it('fails clearly on an invalid local path containing null bytes', () => {

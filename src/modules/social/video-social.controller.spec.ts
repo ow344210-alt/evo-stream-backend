@@ -18,6 +18,7 @@ import { SavedVideosService } from './saved-videos.service';
 import { WatchHistoryService } from './watch-history.service';
 import { VideoSharesService } from './video-shares.service';
 import { SocialSummaryService } from './social-summary.service';
+import { VideoViewsService } from './video-views.service';
 
 const SECRET = 'test-secret';
 const CURRENT_USER_ID = 'u1';
@@ -68,6 +69,7 @@ describe('Social controllers (E2E guard boundary + wiring)', () => {
   };
   const shares = { share: jest.fn() };
   const summary = { getSummary: jest.fn() };
+  const views = { recordView: jest.fn() };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -75,6 +77,7 @@ describe('Social controllers (E2E guard boundary + wiring)', () => {
     comments.list.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20, totalPages: 0 });
     summary.getSummary.mockResolvedValue({ likeCount: 1, commentCount: 0, shareCount: 0 });
     shares.share.mockResolvedValue({ shared: true, shareCount: 1 });
+    views.recordView.mockResolvedValue({ recorded: true, reason: 'NEW_VIEW' });
 
     const moduleFixture = await Test.createTestingModule({
       imports: [PassportModule],
@@ -95,6 +98,7 @@ describe('Social controllers (E2E guard boundary + wiring)', () => {
         { provide: WatchHistoryService, useValue: history },
         { provide: VideoSharesService, useValue: shares },
         { provide: SocialSummaryService, useValue: summary },
+        { provide: VideoViewsService, useValue: views },
       ],
     }).compile();
 
@@ -191,5 +195,32 @@ describe('Social controllers (E2E guard boundary + wiring)', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .expect(201);
     expect(shares.share).toHaveBeenCalledWith(CURRENT_USER_ID, VIDEO);
+  });
+
+  it('allows public view recording without token', async () => {
+    await request(app.getHttpServer())
+      .post(`/api/videos/${VIDEO}/view`)
+      .send({ sessionToken: 'anon-dev-uuid', watchDurationSeconds: 6.5 })
+      .expect(201);
+    expect(views.recordView).toHaveBeenCalledWith(
+      VIDEO,
+      undefined,
+      expect.any(String),
+      expect.objectContaining({ sessionToken: 'anon-dev-uuid', watchDurationSeconds: 6.5 }),
+    );
+  });
+
+  it('records view with authenticated user id when token provided', async () => {
+    await request(app.getHttpServer())
+      .post(`/api/videos/${VIDEO}/view`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ sessionToken: 'anon-dev-uuid', watchDurationSeconds: 12 })
+      .expect(201);
+    expect(views.recordView).toHaveBeenCalledWith(
+      VIDEO,
+      CURRENT_USER_ID,
+      expect.any(String),
+      expect.objectContaining({ sessionToken: 'anon-dev-uuid', watchDurationSeconds: 12 }),
+    );
   });
 });

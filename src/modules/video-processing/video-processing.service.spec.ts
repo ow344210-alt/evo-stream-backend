@@ -1,4 +1,7 @@
 import { VideoProcessingStatus } from '@prisma/client';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { VideoProcessingService } from './video-processing.service';
 import {
   TranscodeResult,
@@ -18,6 +21,14 @@ describe('VideoProcessingService', () => {
   };
   let transcoder: VideoTranscodingProvider;
   let transcodeConfig: { renditions: unknown[]; posterAtSeconds: number };
+  let storage: {
+    name: string;
+    store: jest.Mock;
+    getObject: jest.Mock;
+    deletePrefix: jest.Mock;
+    read: jest.Mock;
+    delete: jest.Mock;
+  };
 
   const readyResult: TranscodeResult = {
     renditions: [
@@ -49,10 +60,20 @@ describe('VideoProcessingService', () => {
       },
     };
 
+    storage = {
+      name: 'local',
+      store: jest.fn(),
+      getObject: jest.fn(),
+      deletePrefix: jest.fn(),
+      read: jest.fn(),
+      delete: jest.fn(),
+    };
+
     service = new VideoProcessingService(
       prisma as unknown as PrismaService,
       transcoder,
       transcodeConfig as never,
+      storage as never,
     );
   });
 
@@ -132,16 +153,155 @@ describe('VideoProcessingService', () => {
     expect(prisma.video.update).not.toHaveBeenCalled();
   });
 
-  it('does not re-process a video that is already PROCESSING', async () => {
+  it('does not re-process a video that is freshly PROCESSING', async () => {
     prisma.video.findUnique = jest.fn().mockResolvedValue({
       id: 'v1',
       sourceStorageKey: 'videos/v1/source/clip.mp4',
       processingStatus: VideoProcessingStatus.PROCESSING,
+      updatedAt: new Date(),
     });
 
     const status = await service.processVideo('v1');
 
     expect(status).toBe(VideoProcessingStatus.PROCESSING);
     expect(transcoder.transcode).not.toHaveBeenCalled();
+    expect(prisma.video.update).not.toHaveBeenCalled();
+  });
+
+  it('recovers a stale PROCESSING video, clears old artifacts, and converges to READY', async () => {
+    prisma.video.findUnique = jest.fn().mockResolvedValue({
+      id: 'v1',
+      sourceStorageKey: 'videos/v1/source/clip.mp4',
+      processingStatus: VideoProcessingStatus.PROCESSING,
+      updatedAt: new Date(Date.now() - 30 * 60 * 1000),
+    });
+    prisma.video.update = jest.fn().mockResolvedValue({ id: 'v1' });
+
+    const status = await service.processVideo('v1');
+
+    expect(status).toBe(VideoProcessingStatus.READY);
+    expect(transcoder.transcode).toHaveBeenCalledTimes(1);
+
+    const updates = prisma.video.update.mock.calls.map((c) => c[0].data.processingStatus);
+    expect(updates).toContain(VideoProcessingStatus.READY);
+
+    // Retry converges instead of duplicating: old rows are cleared first, and
+    // the new rows are written exactly once.
+    expect(
+      prisma.videoRendition.deleteMany.mock.invocationCallOrder[0],
+    ).toBeLessThan(prisma.videoRendition.createMany.mock.invocationCallOrder[0]);
+    expect(prisma.videoRendition.createMany).toHaveBeenCalledTimes(1);
+    expect(prisma.videoThumbnail.createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a video FAILED and sanitizes the error when a bounded operation times out', async () => {
+    prisma.video.findUnique = jest.fn().mockResolvedValue({
+      id: 'v1',
+      sourceStorageKey: 'videos/v1/source/clip.mp4',
+      processingStatus: VideoProcessingStatus.UPLOADED,
+    });
+    (transcoder.transcode as jest.Mock).mockRejectedValue(
+      new Error('Bunny storage request timed out after 300000ms'),
+    );
+    prisma.video.update = jest.fn().mockResolvedValue({ id: 'v1' });
+
+    const status = await service.processVideo('v1');
+
+    expect(status).toBe(VideoProcessingStatus.FAILED);
+    const failedData = prisma.video.update.mock.calls
+      .map((c) => c[0].data)
+      .find((d) => d.processingStatus === VideoProcessingStatus.FAILED);
+    expect(failedData.processError).toContain('timed out');
+  });
+
+  describe('remote (bunny) publish of the full HLS tree', () => {
+    function makeBunnyStorage() {
+      return {
+        name: 'bunny',
+        store: jest.fn().mockResolvedValue({ provider: 'bunny', key: 'k', sizeBytes: 1 }),
+        getObject: jest.fn().mockResolvedValue({ provider: 'bunny', key: 'k', sizeBytes: 1 }),
+        deletePrefix: jest.fn().mockResolvedValue(undefined),
+        read: jest.fn().mockResolvedValue(Buffer.from('')),
+        delete: jest.fn(),
+      };
+    }
+
+    function makeTree(tmp: string): TranscodeResult {
+      fs.mkdirSync(path.join(tmp, 'videos/v1/hls/360p'), { recursive: true });
+      fs.mkdirSync(path.join(tmp, 'videos/v1/thumbnails'), { recursive: true });
+      fs.writeFileSync(path.join(tmp, 'videos/v1/hls/master.m3u8'), '#EXTM3U\n');
+      fs.writeFileSync(path.join(tmp, 'videos/v1/hls/360p/index.m3u8'), '#EXTM3U\n');
+      fs.writeFileSync(path.join(tmp, 'videos/v1/hls/360p/segment_0000.ts'), 'seg');
+      fs.writeFileSync(path.join(tmp, 'videos/v1/thumbnails/poster.jpg'), 'jpg');
+
+      return {
+        ...readyResult,
+        outputRoot: tmp,
+      };
+    }
+
+    beforeEach(() => {
+      prisma.video.findUnique = jest.fn().mockResolvedValue({
+        id: 'v1',
+        sourceStorageKey: 'videos/v1/source/clip.mp4',
+        processingStatus: VideoProcessingStatus.UPLOADED,
+      });
+      prisma.video.update = jest.fn().mockResolvedValue({ id: 'v1' });
+    });
+
+    it('uploads the complete HLS tree and persists the real provider name', async () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-publish-'));
+      const bunnyStorage = makeBunnyStorage();
+      (transcoder.transcode as jest.Mock).mockResolvedValue(makeTree(tmp));
+      service = new VideoProcessingService(
+        prisma as unknown as PrismaService,
+        transcoder,
+        transcodeConfig as never,
+        bunnyStorage as never,
+      );
+
+      const status = await service.processVideo('v1');
+
+      expect(status).toBe(VideoProcessingStatus.READY);
+
+      const uploaded = bunnyStorage.store.mock.calls.map((c) => (c[0] as { objectPath: string }).objectPath);
+      expect(uploaded.sort()).toEqual([
+        'videos/v1/hls/360p/index.m3u8',
+        'videos/v1/hls/360p/segment_0000.ts',
+        'videos/v1/hls/master.m3u8',
+        'videos/v1/thumbnails/poster.jpg',
+      ]);
+
+      // The persisted storageProvider must be the ACTIVE provider, not "local".
+      const renditionData = prisma.videoRendition.createMany.mock.calls[0][0].data;
+      expect(renditionData.every((r: { storageProvider: string }) => r.storageProvider === 'bunny')).toBe(true);
+      const thumbData = prisma.videoThumbnail.createMany.mock.calls[0][0].data;
+      expect(thumbData.every((t: { storageProvider: string }) => t.storageProvider === 'bunny')).toBe(true);
+
+      // The local scratch workspace is removed after a successful publish.
+      expect(fs.existsSync(tmp)).toBe(false);
+    });
+
+    it('cleans partial cloud prefixes and marks the video FAILED when publishing fails', async () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-publish-fail-'));
+      const bunnyStorage = makeBunnyStorage();
+      bunnyStorage.store.mockRejectedValue(new Error('upload exploded'));
+      bunnyStorage.getObject.mockRejectedValue(new Error('upload exploded'));
+      (transcoder.transcode as jest.Mock).mockResolvedValue(makeTree(tmp));
+      service = new VideoProcessingService(
+        prisma as unknown as PrismaService,
+        transcoder,
+        transcodeConfig as never,
+        bunnyStorage as never,
+      );
+
+      const status = await service.processVideo('v1');
+
+      expect(status).toBe(VideoProcessingStatus.FAILED);
+      expect(bunnyStorage.deletePrefix).toHaveBeenCalledWith('videos/v1/hls');
+      expect(bunnyStorage.deletePrefix).toHaveBeenCalledWith('videos/v1/thumbnails');
+      expect(fs.existsSync(tmp)).toBe(false);
+      expect(prisma.videoRendition.createMany).not.toHaveBeenCalled();
+    });
   });
 });

@@ -88,6 +88,28 @@ export class LocalVideoStorageService implements VideoStorageProvider {
     }
   }
 
+  async deletePrefix(prefix: string): Promise<void> {
+    const safePrefix = buildSafeObjectKey(prefix);
+    const absolutePath = resolveWithin(this.root, safePrefix);
+    this.assertInsideRoot(absolutePath);
+
+    try {
+      await fsp.rm(absolutePath, { recursive: true, force: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Deleting an already-missing prefix is a defined no-op.
+      if (code === 'ENOENT') return;
+      throw error;
+    }
+  }
+
+  async read(key: string): Promise<Buffer> {
+    const safeKey = buildSafeObjectKey(key);
+    const absolutePath = resolveWithin(this.root, safeKey);
+    this.assertInsideRoot(absolutePath);
+    return fsp.readFile(absolutePath);
+  }
+
   async getObject(key: string): Promise<VideoStorageObject | null> {
     const safeKey = buildSafeObjectKey(key);
     const absolutePath = resolveWithin(this.root, safeKey);
@@ -108,5 +130,12 @@ export class LocalVideoStorageService implements VideoStorageProvider {
       key: safeKey,
       sizeBytes: stat.size,
     };
+  }
+
+  getPublicUrl(_key: string): string | null {
+    // Local storage serves objects through the backend's /api/media endpoint,
+    // which is constructed from the storage key at the playback layer. There
+    // is no standalone public URL such as a CDN pull zone.
+    return null;
   }
 }

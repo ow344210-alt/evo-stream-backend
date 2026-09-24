@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import {
   Prisma,
   VideoProcessingStatus,
@@ -7,6 +7,10 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { Paginated } from '../../common/dto/pagination.dto';
 import { FeedQueryDto } from './dto/feed-query.dto';
+import {
+  VIDEO_STORAGE_PROVIDER,
+  type VideoStorageProvider,
+} from '../video-storage/video-storage.types';
 
 /**
  * Safe, minimal public video card returned by the Phase-2 mobile discovery
@@ -41,7 +45,10 @@ export interface PublicVideoCard {
  */
 @Injectable()
 export class PublicFeedService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(VIDEO_STORAGE_PROVIDER) private readonly storage: VideoStorageProvider,
+  ) {}
 
   /** MVP trending window: a video's recency weight is based on this many days. */
   private static readonly TRENDING_WINDOW_DAYS = 30;
@@ -216,12 +223,23 @@ export class PublicFeedService {
       description: video.description,
       durationSeconds: video.durationSeconds,
       posterUrl: video.posterThumbnailKey
-        ? `/api/media/${video.id}/${this.stripVideoPrefix(video.posterThumbnailKey)}`
+        ? this.resolveMediaUrl(video.id, video.posterThumbnailKey)
         : null,
       publishedAt: video.publishedAt?.toISOString() ?? null,
       channel: video.channel,
       category: video.category,
     };
+  }
+
+  /**
+   * Resolve a storage key to its public media URL. CDN-backed providers (e.g.
+   * bunny) supply an absolute public URL; local storage maps to the API media
+   * endpoint.
+   */
+  private resolveMediaUrl(videoId: string, storageKey: string): string {
+    const external = this.storage.getPublicUrl(storageKey);
+    if (external) return external;
+    return `/api/media/${videoId}/${this.stripVideoPrefix(storageKey)}`;
   }
 
   private stripVideoPrefix(storageKey: string): string {

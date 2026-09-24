@@ -69,9 +69,31 @@ export interface VideoStorageProvider {
   delete(key: string): Promise<void>;
 
   /**
+   * Remove every object under `prefix` (the prefix itself and its whole
+   * subtree). Deleting a prefix that does not yet exist is a defined no-op.
+   * Used to clean up the complete `videos/{videoId}/...` tree on video
+   * deletion, since HLS playlists reference sibling segments relatively.
+   */
+  deletePrefix(prefix: string): Promise<void>;
+
+  /**
    * Retrieve metadata for a stored object, or `null` when it does not exist.
    */
   getObject(key: string): Promise<VideoStorageObject | null>;
+
+  /**
+   * Read the full bytes of a stored object. Throws when the object does not
+   * exist or cannot be read.
+   */
+  read(key: string): Promise<Buffer>;
+
+  /**
+   * Absolute public URL for an object, when the provider serves objects over
+   * an HTTPS/CDN endpoint (e.g. a bunny pull zone). Returns `null` when the
+   * provider has no public URL scheme (local storage) so callers can fall
+   * back to the API media endpoint.
+   */
+  getPublicUrl(key: string): string | null;
 }
 
 /** DI token for the configured `VideoStorageProvider` implementation. */

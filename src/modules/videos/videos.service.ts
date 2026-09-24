@@ -249,14 +249,16 @@ export class VideosService {
     const video = await this.findOwnVideo(userId, videoId);
     await this.prisma.video.delete({ where: { id: video.id } });
 
-    // After a successful destructive delete, best-effort clean up the stored
-    // source object. Deleting a missing object is a defined no-op.
+    // After a successful destructive delete, best-effort clean up the entire
+    // stored tree for this video (source + HLS playlists/segments + posters)
+    // since only the complete tree relocates with the video. Deleting a
+    // missing prefix is a defined no-op.
     if (video.sourceStorageKey) {
       try {
-        await this.storage.delete(video.sourceStorageKey);
+        await this.storage.deletePrefix(`videos/${video.id}`);
       } catch (error) {
         this.logger.error(
-          `Failed to delete stored source ${video.sourceStorageKey}`,
+          `Failed to delete stored tree for video ${video.id}`,
           error instanceof Error ? error.stack : undefined,
         );
       }

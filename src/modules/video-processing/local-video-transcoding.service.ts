@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
 import {
   TranscodeOptions,
@@ -13,14 +14,40 @@ import {
 } from './video-transcoding.types';
 import { VideoTranscodeConfig } from './video-transcode.config';
 import { VideoStorageConfig } from '../video-storage/video-storage.config';
+import {
+  VIDEO_STORAGE_PROVIDER,
+  type VideoStorageProvider,
+} from '../video-storage/video-storage.types';
 import { resolveWithin } from '../video-storage/storage-path.util';
 
 const execFileAsync = promisify(execFile);
 
 /**
- * FFmpeg-backed transcoder for local storage. Produces an adaptive HLS ladder
- * plus a poster thumbnail, written directly under the local storage root so the
- * catalogued provider-relative keys remain stable and storage-consistent.
+ * Bounds for FFmpeg/Ffprobe child processes. Long-form content is explicitly
+ * supported, so transcode jobs get a duration-aware ceiling rather than a fixed
+ * short cap. A timed-out child is killed (SIGKILL) and the resulting error
+ * propagates so the processing layer marks the video FAILED instead of leaving
+ * it stuck in PROCESSING.
+ */
+const FFPROBE_TIMEOUT_MS = 30 * 1000;
+const FFMPEG_TIMEOUT_MIN_MS = 15 * 60 * 1000;
+/** Wall-clock seconds allowed per second of source media. */
+const FFMPEG_TIMEOUT_MULTIPLIER = 5;
+const FFMPEG_TIMEOUT_MAX_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * FFmpeg-backed transcoder. Produces an adaptive HLS ladder plus a poster
+ * thumbnail.
+ *
+ * With the `local` storage provider, output is written directly under the
+ * local storage root so the catalogued provider-relative keys stay stable and
+ * storage-consistent.
+ *
+ * With a remote provider (e.g. `bunny`), the source object is read through the
+ * storage abstraction into a temporary local workspace, FFmpeg produces the
+ * tree there, and the returned `outputRoot` hands the tree to the processing
+ * layer for publishing to the active provider. The workspace is removed on any
+ * failure here (and by the processing layer after a successful publish).
  *
  * FFmpeg/Ffprobe are resolved via PATH (or FFMPEG_PATH/FFPROBE_PATH). When they
  * are unavailable the job throws a descriptive error that the processing layer
@@ -34,7 +61,32 @@ export class LocalVideoTranscodingService implements VideoTranscodingProvider {
   constructor(
     private readonly storageConfig: VideoStorageConfig,
     private readonly transcodeConfig: VideoTranscodeConfig,
+    @Inject(VIDEO_STORAGE_PROVIDER) private readonly storage: VideoStorageProvider,
   ) {}
+
+  /** Fixed ceiling for the cheap duration probe. */
+  private probeTimeoutMs(): number {
+    return FFPROBE_TIMEOUT_MS;
+  }
+
+  /**
+   * Duration-aware ceiling for one rendition encode. Bounded below by
+   * `FFMPEG_TIMEOUT_MIN_MS`, above by `FFMPEG_TIMEOUT_MAX_MS`, and scaled by the
+   * source duration so legitimate long-form videos are not killed mid-encode.
+   */
+  private renditionTimeoutMs(durationSeconds: number): number {
+    const computed = durationSeconds * FFMPEG_TIMEOUT_MULTIPLIER * 1000;
+    return Math.min(FFMPEG_TIMEOUT_MAX_MS, Math.max(FFMPEG_TIMEOUT_MIN_MS, computed));
+  }
+
+  private execOptions(timeoutMs: number) {
+    return {
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL' as const,
+    };
+  }
 
   async transcode(
     options: TranscodeOptions & {
@@ -50,49 +102,88 @@ export class LocalVideoTranscodingService implements VideoTranscodingProvider {
       );
     }
 
-    if (!this.storageConfig.localStoragePath) {
+    const writesToLocalRoot = this.storage.name === 'local';
+    if (writesToLocalRoot && !this.storageConfig.localStoragePath) {
       throw new Error('Local transcoding requires the local storage provider (VIDEO_STORAGE_PROVIDER=local).');
     }
 
-    const root = path.resolve(this.storageConfig.localStoragePath);
-    const sourceAbs = resolveWithin(root, options.sourceKey);
-    if (!fs.existsSync(sourceAbs)) {
-      throw new Error(`Source object not found at ${options.sourceKey}`);
+    // Resolve/clone the source into a local path FFmpeg can read, and decide
+    // where the output tree is written.
+    let sourceAbs: string;
+    let outputPrefixAbs: string;
+    let thumbPrefixAbs: string;
+    let scratchRoot: string | undefined;
+
+    if (writesToLocalRoot) {
+      const root = path.resolve(this.storageConfig.localStoragePath);
+      sourceAbs = resolveWithin(root, options.sourceKey);
+      if (!fs.existsSync(sourceAbs)) {
+        throw new Error(`Source object not found at ${options.sourceKey}`);
+      }
+      outputPrefixAbs = resolveWithin(root, options.outputPrefix);
+      thumbPrefixAbs = resolveWithin(root, options.thumbnailPrefix);
+    } else {
+      scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-transcode-'));
+      try {
+        this.logger.log(`Source download started: ${options.sourceKey}`);
+        const sourceBytes = await this.storage.read(options.sourceKey);
+        sourceAbs = path.join(scratchRoot, 'source');
+        await fsp.writeFile(sourceAbs, sourceBytes);
+        this.logger.log(`Source download completed (${sourceBytes.length} bytes)`);
+      } catch (error) {
+        await fsp.rm(scratchRoot, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+      outputPrefixAbs = path.join(scratchRoot, ...options.outputPrefix.split('/'));
+      thumbPrefixAbs = path.join(scratchRoot, ...options.thumbnailPrefix.split('/'));
     }
 
-    const outputPrefixAbs = resolveWithin(root, options.outputPrefix);
-    const thumbPrefixAbs = resolveWithin(root, options.thumbnailPrefix);
+    this.logger.log(`Transcoding workspace ready for ${options.outputPrefix}`);
 
-    const duration = await this.probeDuration(ffprobe, sourceAbs);
+    try {
+      const duration = await this.probeDuration(ffprobe, sourceAbs);
+      this.logger.log(`ffprobe completed: duration=${duration}s`);
 
-    const renditions: TranscodeRenditionResult[] = [];
-    for (const spec of options.renditions) {
-      renditions.push(
-        await this.makeRendition(ffmpeg, sourceAbs, outputPrefixAbs, options.outputPrefix, spec),
+      const renditions: TranscodeRenditionResult[] = [];
+      for (const spec of options.renditions) {
+        this.logger.log(`Rendition ${spec.label} started`);
+        renditions.push(
+          await this.makeRendition(ffmpeg, sourceAbs, outputPrefixAbs, options.outputPrefix, spec, duration),
+        );
+        this.logger.log(`Rendition ${spec.label} completed`);
+      }
+
+      const posterAt = options.posterAtSeconds ?? 0;
+      this.logger.log(`Poster generation started (t=${posterAt}s)`);
+      const thumbKeys = await this.makeThumbnails(
+        ffmpeg,
+        sourceAbs,
+        thumbPrefixAbs,
+        options.thumbnailPrefix,
+        posterAt,
       );
+      this.logger.log(`Poster generation completed`);
+
+      const masterKey = await this.writeMasterPlaylist(
+        outputPrefixAbs,
+        options.outputPrefix,
+        renditions,
+      );
+      this.logger.log(`Master playlist generated: ${masterKey}`);
+
+      return {
+        renditions,
+        thumbnails: thumbKeys,
+        masterPlaylistKey: masterKey,
+        durationSeconds: duration,
+        outputRoot: writesToLocalRoot ? undefined : scratchRoot,
+      };
+    } catch (error) {
+      if (scratchRoot) {
+        await fsp.rm(scratchRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
+      throw error;
     }
-
-    const posterAt = options.posterAtSeconds ?? 0;
-    const thumbKeys = await this.makeThumbnails(
-      ffmpeg,
-      sourceAbs,
-      thumbPrefixAbs,
-      options.thumbnailPrefix,
-      posterAt,
-    );
-
-    const masterKey = await this.writeMasterPlaylist(
-      outputPrefixAbs,
-      options.outputPrefix,
-      renditions,
-    );
-
-    return {
-      renditions,
-      thumbnails: thumbKeys,
-      masterPlaylistKey: masterKey,
-      durationSeconds: duration,
-    };
   }
 
   private async probeDuration(ffprobe: string, sourceAbs: string): Promise<number> {
@@ -104,7 +195,7 @@ export class LocalVideoTranscodingService implements VideoTranscodingProvider {
         '-of', 'default=noprint_wrappers=1:nokey=1',
         sourceAbs,
       ],
-      { windowsHide: true },
+      { ...this.execOptions(this.probeTimeoutMs()) },
     );
     const value = parseFloat(stdout.trim());
     return Number.isFinite(value) ? value : 0;
@@ -116,6 +207,7 @@ export class LocalVideoTranscodingService implements VideoTranscodingProvider {
     outputPrefixAbs: string,
     outputPrefixKey: string,
     spec: TranscodeRenditionSpec,
+    durationSeconds: number,
   ): Promise<TranscodeRenditionResult> {
     const rDir = path.join(outputPrefixAbs, spec.label);
     await fsp.mkdir(rDir, { recursive: true });
@@ -142,7 +234,7 @@ export class LocalVideoTranscodingService implements VideoTranscodingProvider {
       path.join(rDir, 'index.m3u8'),
     ];
 
-    await execFileAsync(ffmpeg, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    await execFileAsync(ffmpeg, args, this.execOptions(this.renditionTimeoutMs(durationSeconds)));
     // ffmpeg logs to stderr; a large log is expected, only non-zero exit throws.
 
     const height = spec.height ?? 720;
@@ -177,11 +269,12 @@ export class LocalVideoTranscodingService implements VideoTranscodingProvider {
         ...seek,
         '-i', sourceAbs,
         '-frames:v', '1',
+        '-update', '1',
         '-vf', 'scale=w=1280:h=720:force_original_aspect_ratio=decrease',
         '-q:v', '3',
         posterFile,
       ],
-      { windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      { ...this.execOptions(this.renditionTimeoutMs(0)) },
     );
     return [{ key: `${thumbPrefixKey}/poster.jpg`, kind: 'poster', mimeType: 'image/jpeg' }];
   }

@@ -58,6 +58,7 @@ model User {
   savedVideos    SavedVideo[]
   watchHistory   WatchHistory[]
   videoShares    VideoShare[]
+  videoViews     VideoView[]
 
   @@index([role])
   @@index([status])
@@ -156,6 +157,7 @@ model Video {
   savedBy  SavedVideo[]
   watchBy  WatchHistory[]
   shares   VideoShare[]
+  views    VideoView[]
 
   @@index([channelId])
   @@index([categoryId])
@@ -304,6 +306,23 @@ model VideoShare {
   @@index([videoId])
   @@index([userId])
   @@index([createdAt])
+}
+
+// Qualified video playback view event for real telemetry and creator analytics.
+model VideoView {
+  id         String   @id @default(uuid())
+  videoId    String
+  userId     String?
+  viewerHash String   // Pseudonymous identifier (user ID or hashed anon ID)
+  viewedAt   DateTime @default(now())
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([videoId])
+  @@index([userId])
+  @@index([viewedAt])
+  @@index([videoId, viewerHash, viewedAt(sort: Desc)])
 }
 
 model RefreshToken {

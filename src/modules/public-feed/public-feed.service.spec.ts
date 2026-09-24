@@ -1,6 +1,14 @@
 import { VideoProcessingStatus, VideoStatus } from '@prisma/client';
 import { PublicFeedService, type PublicVideoCard } from './public-feed.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { VideoStorageProvider } from '../video-storage/video-storage.types';
+
+function newStorage(name: string = 'local'): { name: string; getPublicUrl: jest.Mock } {
+  return {
+    name,
+    getPublicUrl: jest.fn(() => null),
+  };
+}
 
 function row(overrides: Record<string, unknown> = {}) {
   return {
@@ -48,7 +56,7 @@ describe('PublicFeedService', () => {
       category: { findFirst: jest.fn(), findUnique: jest.fn() },
       $transaction: jest.fn((ops: any[]) => Promise.all(ops)),
     };
-    service = new PublicFeedService(prisma as unknown as PrismaService);
+    service = new PublicFeedService(prisma as unknown as PrismaService, newStorage('local') as unknown as VideoStorageProvider);
   });
 
   describe('eligibility + pagination', () => {
@@ -98,6 +106,23 @@ describe('PublicFeedService', () => {
       const res = await service.latest({ page: 1, pageSize: 20 });
       expect(res.items[0].posterUrl).toBeNull();
     });
+
+    it('uses the CDN public URL for the poster when the provider exposes one (bunny)', async () => {
+      const storage = newStorage('bunny');
+      storage.getPublicUrl.mockImplementation(
+        (key: string) => `https://cdn.example.com/${key}`,
+      );
+      service = new PublicFeedService(
+        prisma as unknown as PrismaService,
+        storage as unknown as VideoStorageProvider,
+      );
+
+      const res = await service.latest({ page: 1, pageSize: 20 });
+
+      expect(res.items[0].posterUrl).toBe(
+        'https://cdn.example.com/videos/v1/thumbnails/poster.jpg',
+      );
+    });
   });
 
   describe('trending (MVP deterministic)', () => {
@@ -108,7 +133,7 @@ describe('PublicFeedService', () => {
         row({ id: 'c', title: 'C', _count: { likes: 0, comments: 1, shares: 2 } }),
       ];
       prisma.video.findMany = jest.fn().mockResolvedValue(rows.slice());
-      service = new PublicFeedService(prisma as unknown as PrismaService);
+      service = new PublicFeedService(prisma as unknown as PrismaService, newStorage('local') as unknown as VideoStorageProvider);
 
       const res = await service.trending({ page: 1, pageSize: 20 });
       const ids = res.items.map((i) => i.id);
@@ -121,7 +146,7 @@ describe('PublicFeedService', () => {
         row({ id: 'a', _count: { likes: 0, comments: 0, shares: 0 } }),
       ];
       prisma.video.findMany = jest.fn().mockResolvedValue(rows.slice());
-      service = new PublicFeedService(prisma as unknown as PrismaService);
+      service = new PublicFeedService(prisma as unknown as PrismaService, newStorage('local') as unknown as VideoStorageProvider);
 
       await service.trending({ page: 1, pageSize: 20 });
       const args = prisma.video.findMany.mock.calls[0][0];

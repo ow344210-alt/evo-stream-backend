@@ -1,4 +1,4 @@
-﻿import { Test } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { VideoStorageModule } from '../video-storage/video-storage.module';
@@ -13,7 +13,11 @@ describe('VideosModule DI wiring', () => {
   it('injects the storage provider, upload policy and processing queue into VideosService', async () => {
     const mod = await Test.createTestingModule({
       imports: [
-        ConfigModule.forRoot({ isGlobal: true }),
+        ConfigModule.forRoot({
+          isGlobal: true,
+          ignoreEnvFile: true,
+          load: [() => ({ VIDEO_STORAGE_PROVIDER: 'local' })],
+        }),
         PrismaModule,
         VideoStorageModule.register(),
         VideoProcessingModule.register(),

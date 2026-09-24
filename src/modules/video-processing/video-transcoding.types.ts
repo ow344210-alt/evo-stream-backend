@@ -42,6 +42,14 @@ export interface TranscodeResult {
   /** Provider-relative key of the master HLS playlist. */
   masterPlaylistKey: string;
   durationSeconds: number;
+  /**
+   * Absolute filesystem root that contains every produced artifact when the
+   * transcoder did NOT write them directly into the local storage root (e.g.
+   * when the active storage provider is `bunny` and a temporary local workspace
+   * was used). The processing layer publishes this tree to the active provider
+   * and then deletes it. Never persisted, logged, or exposed through the API.
+   */
+  outputRoot?: string;
 }
 
 /**

@@ -1,4 +1,4 @@
-﻿import { Test } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { VideoStorageModule } from './video-storage.module';
 import { VIDEO_STORAGE_PROVIDER, VideoStorageProvider } from './video-storage.types';
@@ -6,7 +6,14 @@ import { VIDEO_STORAGE_PROVIDER, VideoStorageProvider } from './video-storage.ty
 describe('VideoStorageModule wiring', () => {
   it('resolves the local provider via DI', async () => {
     const mod = await Test.createTestingModule({
-      imports: [ConfigModule.forRoot({ isGlobal: true }), VideoStorageModule.register()],
+      imports: [
+        ConfigModule.forRoot({
+          isGlobal: true,
+          ignoreEnvFile: true,
+          load: [() => ({ VIDEO_STORAGE_PROVIDER: 'local' })],
+        }),
+        VideoStorageModule.register(),
+      ],
     }).compile();
     const provider = mod.get<VideoStorageProvider>(VIDEO_STORAGE_PROVIDER);
     expect(provider).toBeDefined();

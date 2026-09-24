@@ -58,4 +58,11 @@ pids
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
+# Generated TypeScript build cache
 *.tsbuildinfo
+
+# Local AI/editor workspaces
+.agents/
+.claude/
+.cursor/
+.devin/

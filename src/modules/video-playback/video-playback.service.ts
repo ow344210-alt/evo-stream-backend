@@ -1,6 +1,10 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { VideoProcessingStatus, VideoStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  VIDEO_STORAGE_PROVIDER,
+  type VideoStorageProvider,
+} from '../video-storage/video-storage.types';
 
 /** Safe quality information for a single rendition. */
 export interface PlaybackQuality {
@@ -38,15 +42,19 @@ export interface VideoPlaybackMetadata {
  * - HIDDEN/DRAFT videos are not publicly streamable
  * - PROCESSING/FAILED/UPLOADED videos are not playable
  *
- * All URLs returned are API-relative (e.g. /api/media/...) so the frontend
- * constructs absolute URLs using its configured API base. No filesystem
- * paths are ever exposed.
+ * All URLs returned are either absolute CDN URLs (when the active provider
+ * exposes them, e.g. bunny pull zones) or API-relative (e.g. /api/media/...)
+ * so the frontend constructs absolute URLs using its configured API base. No
+ * filesystem paths are ever exposed.
  */
 @Injectable()
 export class VideoPlaybackService {
   private readonly logger = new Logger(VideoPlaybackService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(VIDEO_STORAGE_PROVIDER) private readonly storage: VideoStorageProvider,
+  ) {}
 
   /**
    * Get playback metadata for a video by ID. Only returns data for videos
@@ -160,11 +168,11 @@ export class VideoPlaybackService {
     }>;
   }): VideoPlaybackMetadata {
     const posterUrl = video.posterThumbnailKey
-      ? `/api/media/${video.id}/${this.stripVideoPrefix(video.posterThumbnailKey)}`
+      ? this.resolveMediaUrl(video.id, video.posterThumbnailKey)
       : null;
 
     const hlsMasterUrl = video.hlsMasterKey
-      ? `/api/media/${video.id}/${this.stripVideoPrefix(video.hlsMasterKey)}`
+      ? this.resolveMediaUrl(video.id, video.hlsMasterKey)
       : null;
 
     return {
@@ -185,6 +193,18 @@ export class VideoPlaybackService {
       })),
       channel: video.channel,
     };
+  }
+
+  /**
+   * Resolve a storage key to its public media URL.
+   *
+   * CDN-backed providers (e.g. bunny) supply an absolute public URL; local
+   * storage maps to the API media endpoint (`/api/media/{videoId}/{relative}`).
+   */
+  private resolveMediaUrl(videoId: string, storageKey: string): string {
+    const external = this.storage.getPublicUrl(storageKey);
+    if (external) return external;
+    return `/api/media/${videoId}/${this.stripVideoPrefix(storageKey)}`;
   }
 
   /**

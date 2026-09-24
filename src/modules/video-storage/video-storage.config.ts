@@ -37,6 +37,18 @@ export class VideoStorageConfig {
   /** Accepted video media types for future upload validation. */
   readonly acceptedVideoMimeTypes: readonly string[];
 
+  /** Bunny storage zone name (provider `bunny`). */
+  readonly bunnyStorageZone?: string;
+
+  /** Bunny storage zone API key (provider `bunny`). Held privately, never logged. */
+  readonly bunnyStorageApiKey?: string;
+
+  /** Bunny storage API hostname (provider `bunny`), e.g. `storage.bunnycdn.com`. */
+  readonly bunnyStorageHostname?: string;
+
+  /** Bunny pull zone (CDN) hostname (provider `bunny`), e.g. `my-zone.b-cdn.net`. */
+  readonly bunnyPullZoneHostname?: string;
+
   constructor(private readonly config: ConfigService) {
     const rawProvider = this.config.get<string>('VIDEO_STORAGE_PROVIDER') ?? 'local';
     if (!isKnownProvider(rawProvider)) {
@@ -51,14 +63,43 @@ export class VideoStorageConfig {
       this.localStoragePath = this.resolveLocalStoragePath(
         this.config.get<string>('VIDEO_LOCAL_STORAGE_PATH'),
       );
+    } else if (rawProvider === 'bunny') {
+      this.localStoragePath = '';
+      const required = [
+        ['BUNNY_STORAGE_ZONE', 'bunnyStorageZone'],
+        ['BUNNY_STORAGE_API_KEY', 'bunnyStorageApiKey'],
+        ['BUNNY_STORAGE_HOSTNAME', 'bunnyStorageHostname'],
+        ['BUNNY_PULL_ZONE_HOSTNAME', 'bunnyPullZoneHostname'],
+      ] as const;
+      const missing: string[] = [];
+      for (const [envName, field] of required) {
+        const value = this.config.get<string>(envName);
+        if (value === undefined || value.trim() === '') {
+          missing.push(envName);
+        } else {
+          (this as unknown as Record<string, string>)[field] = value.trim();
+        }
+      }
+      if (missing.length > 0) {
+        // Report variable NAMES only; values (including the API key) are never
+        // surfaced here.
+        throw new Error(
+          `VIDEO_STORAGE_PROVIDER=bunny requires the following environment variables: ` +
+            `${missing.join(', ')}.`,
+        );
+      }
+      this.assertHostname(this.bunnyStorageHostname!, 'BUNNY_STORAGE_HOSTNAME');
+      this.assertHostname(this.bunnyPullZoneHostname!, 'BUNNY_PULL_ZONE_HOSTNAME');
+      this.assertStorageZone(this.bunnyStorageZone!, 'BUNNY_STORAGE_ZONE');
     } else {
-      // Production adapters are deferred (P2-3+). Selecting one now must fail
-      // clearly at startup rather than silently falling back to local storage.
+      // The s3 adapter is deliberately not implemented by this step. Selecting
+      // it must fail clearly at startup rather than silently falling back to
+      // local storage.
       this.localStoragePath = '';
       throw new Error(
         `VIDEO_STORAGE_PROVIDER "${rawProvider}" is not yet implemented. ` +
           `The production adapter is deferred to the provider-specific step. ` +
-          `Until then, use VIDEO_STORAGE_PROVIDER=local for development/tests.`,
+          `Until then, use VIDEO_STORAGE_PROVIDER=local or VIDEO_STORAGE_PROVIDER=bunny.`,
       );
     }
 
@@ -71,6 +112,21 @@ export class VideoStorageConfig {
       `Video storage initialised: provider=${this.provider}, root=${this.localStoragePath}, ` +
         `maxUploadBytes=${this.maxUploadBytes}`,
     );
+  }
+
+  private assertHostname(value: string, envName: string): void {
+    // A hostname must not contain a scheme, port, path, or whitespace.
+    if (/[\s/:\\@]/.test(value)) {
+      throw new Error(`${envName} must be a bare hostname without scheme, port, or path.`);
+    }
+  }
+
+  private assertStorageZone(value: string, envName: string): void {
+    // Zone names are URL path segments above the object key; forbid chars that
+    // would break the storage URL or allow traversal-like values.
+    if (/[\s/\\#?]/.test(value) || value === '.' || value === '..') {
+      throw new Error(`${envName} must be a plain zone name without path characters.`);
+    }
   }
 
   private resolveLocalStoragePath(raw: string | undefined): string {

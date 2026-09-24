@@ -109,4 +109,31 @@ describe('LocalVideoStorageService', () => {
     expect(meta.key).not.toContain(root);
     expect(meta.key.startsWith('/') || /^[A-Za-z]:/.test(meta.key)).toBe(false);
   });
+
+  it('read returns the full object bytes', async () => {
+    await service.store({ buffer: Buffer.from('hello-evo'), objectPath: 'videos/v1/source/main' });
+    await expect(service.read('videos/v1/source/main')).resolves.toEqual(Buffer.from('hello-evo'));
+  });
+
+  it('read throws for a missing object', async () => {
+    await expect(service.read('never/exists')).rejects.toThrow();
+  });
+
+  it('deletePrefix removes a whole video tree', async () => {
+    await service.store({ buffer: Buffer.from('a'), objectPath: 'videos/v1/source/s1' });
+    await service.store({ buffer: Buffer.from('b'), objectPath: 'videos/v1/hls/360p/index.m3u8' });
+    await service.store({ buffer: Buffer.from('c'), objectPath: 'videos/v1/thumbnails/poster.jpg' });
+
+    await service.deletePrefix('videos/v1');
+
+    expect(fs.existsSync(path.join(root, 'videos', 'v1'))).toBe(false);
+  });
+
+  it('deletePrefix on a missing prefix is a defined no-op', async () => {
+    await expect(service.deletePrefix('videos/ghost')).resolves.toBeUndefined();
+  });
+
+  it('getPublicUrl returns null for local storage', () => {
+    expect(service.getPublicUrl('videos/v1/hls/master.m3u8')).toBeNull();
+  });
 });
